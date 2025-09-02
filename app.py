@@ -1,18 +1,26 @@
 from flask import Flask, request, jsonify, render_template
 from flask_sqlalchemy import SQLAlchemy
 import numpy as np
+import uuid
 from datetime import date
+import os
 
 app = Flask(__name__)
 
 # -------------------- Database Config --------------------
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///fitness.db'
+# Use PostgreSQL in production (Railway), SQLite for local development
+database_url = os.environ.get('DATABASE_URL', 'sqlite:///fitness.db')
+# Fix PostgreSQL URL format if needed
+if database_url.startswith('postgres://'):
+    database_url = database_url.replace('postgres://', 'postgresql://', 1)
+app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
 # -------------------- Session Model --------------------
 class Session(db.Model):
     id = db.Column(db.Integer, primary_key=True)
+    user_session_id = db.Column(db.String(36), nullable=False)  # UUID for user session
     date = db.Column(db.Date, nullable=False, default=date.today)
     week = db.Column(db.Integer, nullable=False)
     year = db.Column(db.Integer, nullable=False)
@@ -62,16 +70,26 @@ def get_week_number(d):
 def home():
     return render_template('index.html')
 
+@app.route('/get_session_id', methods=['GET'])
+def get_session_id():
+    """Generate a new session ID for the user"""
+    session_id = str(uuid.uuid4())
+    return jsonify({"session_id": session_id})
+
 @app.route('/get_totals', methods=['GET'])
 def get_totals():
     """Get weekly and yearly totals for display"""
     try:
+        user_session_id = request.headers.get('X-Session-ID')
+        if not user_session_id:
+            return jsonify({"error": "Session ID required"}), 400
+            
         current_year = date.today().year
         
-        # Weekly totals for current year
+        # Weekly totals for current year (filtered by user session)
         weekly_totals_query = (
             db.session.query(Session.week, db.func.sum(Session.calories))
-            .filter(Session.year == current_year)
+            .filter(Session.year == current_year, Session.user_session_id == user_session_id)
             .group_by(Session.week)
             .all()
         )
@@ -80,9 +98,10 @@ def get_totals():
         weekly_totals_full = {f"Week {i}": 0 for i in range(1, 53)}
         weekly_totals_full.update(weekly_totals)
         
-        # Yearly totals
+        # Yearly totals (filtered by user session)
         yearly_totals_query = (
             db.session.query(Session.year, db.func.sum(Session.calories))
+            .filter(Session.user_session_id == user_session_id)
             .group_by(Session.year)
             .all()
         )
@@ -98,6 +117,10 @@ def get_totals():
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
+        user_session_id = request.headers.get('X-Session-ID')
+        if not user_session_id:
+            return jsonify({"error": "Session ID required"}), 400
+            
         # Extract input
         gender = encode_gender(request.form['gender'])
         age = float(request.form['age'])
@@ -119,22 +142,28 @@ def predict():
         ]
         calories_pred = predict_calories(X)
 
-        # Save session
+        # Save session with user_session_id
         today = date.today()
         week = get_week_number(today)
         year = today.year
 
-        new_session = Session(date=today, week=week, year=year, calories=calories_pred)
+        new_session = Session(
+            user_session_id=user_session_id,
+            date=today, 
+            week=week, 
+            year=year, 
+            calories=calories_pred
+        )
         db.session.add(new_session)
         db.session.commit()
 
-        # Get updated totals
+        # Get updated totals (filtered by user session)
         current_year = date.today().year
         
-        # Weekly totals for current year
+        # Weekly totals for current year (filtered by user session)
         weekly_totals_query = (
             db.session.query(Session.week, db.func.sum(Session.calories))
-            .filter(Session.year == current_year)
+            .filter(Session.year == current_year, Session.user_session_id == user_session_id)
             .group_by(Session.week)
             .all()
         )
@@ -143,9 +172,10 @@ def predict():
         weekly_totals_full = {f"Week {i}": 0 for i in range(1, 53)}
         weekly_totals_full.update(weekly_totals)
 
-        # Yearly totals
+        # Yearly totals (filtered by user session)
         yearly_totals_query = (
             db.session.query(Session.year, db.func.sum(Session.calories))
+            .filter(Session.user_session_id == user_session_id)
             .group_by(Session.year)
             .all()
         )
@@ -162,7 +192,11 @@ def predict():
 
 @app.route('/sessions', methods=['GET'])
 def get_sessions():
-    sessions = Session.query.order_by(Session.date).all()
+    user_session_id = request.headers.get('X-Session-ID')
+    if not user_session_id:
+        return jsonify({"error": "Session ID required"}), 400
+        
+    sessions = Session.query.filter_by(user_session_id=user_session_id).order_by(Session.date).all()
     output = []
     for s in sessions:
         output.append({
@@ -176,7 +210,11 @@ def get_sessions():
 
 @app.route('/delete_session/<int:session_id>', methods=['DELETE'])
 def delete_session(session_id):
-    session = Session.query.get(session_id)
+    user_session_id = request.headers.get('X-Session-ID')
+    if not user_session_id:
+        return jsonify({"error": "Session ID required"}), 400
+        
+    session = Session.query.filter_by(id=session_id, user_session_id=user_session_id).first()
     if not session:
         return jsonify({"error": "Session not found"}), 404
     
@@ -193,7 +231,7 @@ def delete_session(session_id):
     # Weekly totals for current year
     weekly_totals_query = (
         db.session.query(Session.week, db.func.sum(Session.calories))
-        .filter(Session.year == current_year)
+        .filter(Session.year == current_year, Session.user_session_id == user_session_id)
         .group_by(Session.week)
         .all()
     )
@@ -205,6 +243,7 @@ def delete_session(session_id):
     # Yearly totals
     yearly_totals_query = (
         db.session.query(Session.year, db.func.sum(Session.calories))
+        .filter(Session.user_session_id == user_session_id)
         .group_by(Session.year)
         .all()
     )
@@ -218,4 +257,6 @@ def delete_session(session_id):
 
 # -------------------- Run App --------------------
 if __name__ == "__main__":
-    app.run(debug=True)
+    import os
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)

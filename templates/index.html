@@ -575,6 +575,35 @@
     </button>
 
 <script>
+// -------------------- Session Management --------------------
+let userSessionId = localStorage.getItem('fitness_session_id');
+
+// Generate session ID if not exists
+async function initializeSession() {
+    if (!userSessionId) {
+        try {
+            const response = await fetch('/get_session_id');
+            const data = await response.json();
+            userSessionId = data.session_id;
+            localStorage.setItem('fitness_session_id', userSessionId);
+            console.log('New session created:', userSessionId);
+        } catch (error) {
+            console.error('Error creating session:', error);
+        }
+    } else {
+        console.log('Existing session found:', userSessionId);
+    }
+}
+
+// Add session header to all fetch requests
+function fetchWithSession(url, options = {}) {
+    const headers = {
+        'X-Session-ID': userSessionId,
+        ...options.headers
+    };
+    return fetch(url, { ...options, headers });
+}
+
 const form = document.getElementById('fitnessForm');
 const todayEl = document.getElementById('todayCalories');
 const yearlyBody = document.querySelector('#yearlyTable tbody');
@@ -585,7 +614,7 @@ let weeklyChart;
         // -------------------- Load totals on page load --------------------
         async function loadTotals() {
             try {
-                const res = await fetch('/get_totals');
+                const res = await fetchWithSession('/get_totals');
                 const data = await res.json();
                 
                 // Update weekly chart
@@ -788,7 +817,7 @@ let weeklyChart;
         async function loadSessions() {
     const tbody = document.querySelector('#sessionsTable tbody');
             tbody.innerHTML = '';
-    const res = await fetch('/sessions');
+    const res = await fetchWithSession('/sessions');
     const sessions = await res.json();
             
             if (sessions.length === 0) {
@@ -826,7 +855,7 @@ let weeklyChart;
             const id = btn.dataset.id;
                     if (confirm('Are you sure you want to delete this session?')) {
                         try {
-                            const res = await fetch(`/delete_session/${id}`, { method: 'DELETE' });
+                            const res = await fetchWithSession(`/delete_session/${id}`, { method: 'DELETE' });
                             const data = await res.json();
                             
                             if (data.error) {
@@ -881,7 +910,7 @@ let weeklyChart;
             
     const formData = new FormData(form);
             try {
-                const res = await fetch('/predict', { method: 'POST', body: formData });
+                const res = await fetchWithSession('/predict', { method: 'POST', body: formData });
         const data = await res.json();
 
                 if (data.error) {
@@ -980,6 +1009,7 @@ let weeklyChart;
         
         // -------------------- Initialize page --------------------
         document.addEventListener('DOMContentLoaded', async () => {
+            await initializeSession();
             await loadTotals();
             await loadSessions();
         });
